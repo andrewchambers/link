@@ -1,6 +1,7 @@
 package link
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -54,21 +55,38 @@ func CreateLink(wrc io.ReadWriteCloser) *Link {
 }
 
 func (link *Link) readMessages(ch chan<- linkMessage) {
+	reader := bufio.NewReader(link.wrc)
 	for {
-		var m linkMessage
+		line, err := reader.ReadBytes('~')
+		if err != nil {
+			return
+		}
+		m, err := decodeMessage(line)
+		if err != nil {
+			continue
+		}
 		select {
 		case ch <- m:
+			// Sent...
 		case <-link.shutdown:
-			panic("cancel")
+			return
 		}
 	}
 }
 func (link *Link) writeMessages(ch <-chan linkMessage) {
 	for {
 		select {
-		case _ = <-ch:
+		case m := <-ch:
+			encoded, err := encodeMessage(&m)
+			if err != nil {
+				return
+			}
+			_, err = link.wrc.Write(encoded)
+			if err != nil {
+				return
+			}
 		case <-link.shutdown:
-			panic("cancel")
+			return
 		}
 	}
 }
