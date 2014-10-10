@@ -38,8 +38,14 @@ func TestLinkPacketReading(t *testing.T) {
 
 	l := CreateLink(&b)
 
-	_m1 := <-l.messageIn
-	_m2 := <-l.messageIn
+	_m1,err := l.Read(-1)
+	if err != nil {
+	    t.Fatal(err)
+	}
+	_m2,err := l.Read(-1)
+	if err != nil {
+	    t.Fatal(err)
+	}
 
 	if m1.Kind != _m1.Kind {
 		t.Fatal("message did not match...")
@@ -62,10 +68,14 @@ func TestLinkPacketWriting(t *testing.T) {
 
 	l := CreateLink(&b)
 
-	l.messageOut <- m1
+	l.Write(-1,m1)
 
-	m, _ := decodeMessage(b.b.Bytes())
-
+	m, err := decodeMessage(b.b.Bytes())
+    
+    if err != nil {
+        t.Fatal(err)
+    }
+    
 	if m.Kind != m1.Kind {
 		t.Fatal("message did not match")
 	}

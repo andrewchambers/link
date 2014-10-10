@@ -12,6 +12,7 @@ import (
 const (
 	CONNECT = iota
 	ACK
+	ACKACK
 	PING
 	DATA
 )
