@@ -29,29 +29,34 @@ func decodeMessage(b64data []byte) (linkMessage, error) {
 	if b64data[len(b64data) - 1] == '+' {
 	    b64data = b64data[0:len(b64data) - 1]
 	}
+	
 	data := make([]byte,base64.StdEncoding.DecodedLen(len(b64data)))
-	_,err := base64.StdEncoding.Decode(data,b64data)
+
+	n,err := base64.StdEncoding.Decode(data,b64data)
 	if err != nil {
 		return linkMessage{}, err
 	}
+	
+	data = data[0:n]
+	
 	if len(data) < 5 {
 	    return linkMessage{},fmt.Errorf("message must be at least 5 bytes")
 	}
-    checksum :=  binary.BigEndian.Uint32(data)
+	
+    wantedchecksum :=  binary.BigEndian.Uint32(data)
     gobbuff := bytes.NewBuffer(data[4:])
-    
-    if checksum != adler32.Checksum(gobbuff.Bytes()) {
-        return linkMessage{}, err
+    actualchecksum := adler32.Checksum(gobbuff.Bytes())
+    if wantedchecksum != actualchecksum {
+        return linkMessage{}, fmt.Errorf("checksum failed - expected %X got %X",wantedchecksum,actualchecksum)
     }
     
     dec := gob.NewDecoder(gobbuff)
     
     var ret linkMessage
-    err = dec.Decode(ret)
+    err = dec.Decode(&ret)
     if err != nil {
         return linkMessage{}, err
     }
-    
 	return ret,nil
 }
 
