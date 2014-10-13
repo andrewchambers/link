@@ -9,6 +9,8 @@ import (
 	"hash/adler32"
 )
 
+type messageKind int
+
 const (
 	CONNECT = iota
 	ACK
@@ -18,8 +20,9 @@ const (
 )
 
 type linkMessage struct {
-	Kind uint8
-	Data []byte
+	Kind   uint8
+	Seqnum uint
+	Data   []byte
 }
 
 func Init() {
