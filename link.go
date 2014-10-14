@@ -2,8 +2,10 @@ package link
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"mako/serial/link/concurrentbuffer"
 	"net"
 	"sync"
 	"time"
@@ -17,6 +19,17 @@ const (
 )
 
 type LinkSession struct {
+	readBuff io.ReadWriteCloser
+	// Must be held while sending data.
+	writeLock sync.Mutex
+
+	ackChannel chan uint
+
+	keepAliveChannel chan struct{}
+
+	closeOnce sync.Once
+	closed    chan struct{}
+
 	state          int
 	curSeqnum      uint
 	expectedSeqnum uint
@@ -95,12 +108,14 @@ func (link *Link) Read(timeout time.Duration) (linkMessage, error) {
 
 func (link *Link) Write(timeout time.Duration, m linkMessage) error {
 
-	var timeoutChan <-chan time.Time = make(chan time.Time)
+	var timeoutChan <-chan time.Time
 
 	if timeout > 0 {
 		ticker := time.NewTicker(timeout)
 		timeoutChan = ticker.C
 		defer ticker.Stop()
+	} else {
+		timeoutChan = make(chan time.Time)
 	}
 
 	select {
@@ -171,7 +186,6 @@ func (link *Link) Listen() (net.Conn, error) {
 			if err != nil {
 				return nil, err
 			}
-
 			ackack, err := link.Read(5 * time.Second)
 			if err != nil {
 				if err == ErrTimeout {
@@ -185,8 +199,7 @@ func (link *Link) Listen() (net.Conn, error) {
 		}
 	}
 
-	ret := &LinkSession{}
-	ret.link = link
+	ret := newSession(link)
 
 	return ret, nil
 }
@@ -225,9 +238,22 @@ func (link *Link) Dial() (net.Conn, error) {
 	if !connected {
 		return nil, fmt.Errorf("failed to establish connection.")
 	}
+	ret := newSession(link)
+	return ret, nil
+}
+
+func newSession(link *Link) *LinkSession {
 	ret := &LinkSession{}
 	ret.link = link
-	return ret, nil
+	// Max buff is 1 meg for now.
+	ret.readBuff = concurrentbuffer.New(1024 * 1024)
+	ret.ackChannel = make(chan uint)
+	ret.keepAliveChannel = make(chan struct{})
+	ret.closed = make(chan struct{})
+	go ret.handleMessages()
+	go ret.handleTimeout()
+	go ret.handlePings()
+	return ret
 }
 
 type dummyLinkAddr struct{}
@@ -245,10 +271,63 @@ func (s *LinkSession) sendAck(seqnum uint) error {
 	ackmessage.Kind = ACK
 	ackmessage.Seqnum = seqnum
 	err := s.link.Write(-1, ackmessage)
+	if err != nil {
+		s.Close()
+	}
 	return err
 }
 
-func (s *LinkSession) handleReads() {
+func (s *LinkSession) sendData(seqnum uint, data []byte) error {
+	d := linkMessage{}
+	d.Kind = DATA
+	d.Seqnum = seqnum
+	d.Data = data
+	err := s.link.Write(-1, d)
+	if err != nil {
+		s.Close()
+	}
+	return err
+}
+
+func (s *LinkSession) handlePings() {
+	defer s.Close()
+	p := linkMessage{}
+	p.Kind = PING
+	for {
+		if s.isClosed() {
+			return
+		}
+		time.Sleep(1 * time.Second)
+		err := s.link.Write(-1, p)
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (s *LinkSession) handleTimeout() {
+	defer s.Close()
+
+	duration := 5 * time.Second
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop() // Might not be needed....
+
+	for {
+		select {
+		case <-s.keepAliveChannel:
+			timer.Reset(duration)
+		case <-timer.C:
+			return
+		case <-s.closed:
+			return
+		}
+
+	}
+
+}
+
+func (s *LinkSession) handleMessages() {
 	defer s.Close()
 	for {
 		m, err := s.link.Read(-1)
@@ -256,14 +335,35 @@ func (s *LinkSession) handleReads() {
 			return
 		}
 		switch m.Kind {
+
+		case PING:
+			s.keepAliveChannel <- struct{}{}
+		case ACK:
+			s.keepAliveChannel <- struct{}{}
+			//XXX dropped ack packets slow everything down considerably.
+			// refactor somehow?
+			select {
+			case s.ackChannel <- m.Seqnum:
+			case <-time.After(1 * time.Millisecond):
+				// Noone is listening, discard ack.
+				// They will have to try again.
+			}
 		case DATA:
+			s.keepAliveChannel <- struct{}{}
 			switch {
 			case m.Seqnum == s.expectedSeqnum:
-
-				// if buffer
-				// s.expectedSeqnum++
-				// err := s.sendAck(m.Seqnum)
-
+				_, err := s.readBuff.Write(m.Data)
+				if err == concurrentbuffer.BufferFull {
+					// Drop packet.
+				} else if err != nil {
+					return
+				} else if err == nil {
+					s.expectedSeqnum++
+					err := s.sendAck(m.Seqnum)
+					if err != nil {
+						return
+					}
+				}
 			case m.Seqnum < s.expectedSeqnum:
 				err := s.sendAck(m.Seqnum)
 				if err != nil {
@@ -272,20 +372,56 @@ func (s *LinkSession) handleReads() {
 			default:
 				//nothing
 			}
+		default:
 		}
 	}
 }
 
 func (s *LinkSession) Read(b []byte) (n int, err error) {
-	return 0, nil
+	return s.readBuff.Read(b)
 }
 
 func (s *LinkSession) Write(b []byte) (n int, err error) {
-	panic("unimplemented")
+	s.writeLock.Lock()
+	defer s.writeLock.Unlock()
+
+	seqnum := s.curSeqnum
+
+	for {
+		if s.isClosed() {
+			return 0, errors.New("session closed")
+		}
+		err := s.sendData(seqnum, b)
+		if err != nil {
+			s.Close()
+			return 0, err
+		}
+		select {
+		case recievedSeqnum := <-s.ackChannel:
+			if recievedSeqnum == seqnum {
+				s.curSeqnum++
+				return len(b), nil
+			}
+		case <-time.After(15 * time.Millisecond): // XXX make this based of round trip.
+			//Resend via looping.
+		}
+	}
+
 }
 
 func (s *LinkSession) Close() error {
-	panic("unimplemented")
+	f := func() { close(s.closed) }
+	s.closeOnce.Do(f)
+	return nil
+}
+
+func (s *LinkSession) isClosed() bool {
+	select {
+	case <-s.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *LinkSession) LocalAddr() net.Addr {
@@ -297,13 +433,13 @@ func (s *LinkSession) RemoteAddr() net.Addr {
 }
 
 func (s *LinkSession) SetDeadline(t time.Time) error {
-	return fmt.Errorf("unimplemented")
+	panic("unimplemented")
 }
 
 func (s *LinkSession) SetReadDeadline(t time.Time) error {
-	return fmt.Errorf("unimplemented")
+	panic("unimplemented")
 }
 
 func (s *LinkSession) SetWriteDeadline(t time.Time) error {
-	return fmt.Errorf("unimplemented")
+	panic("unimplemented")
 }

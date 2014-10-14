@@ -81,6 +81,7 @@ func (b *concurrentBuffer) Read(p []byte) (int, error) {
 
 	b.sz -= uint(n)
 	b.cond.L.Unlock()
+
 	return n, nil
 }
 
@@ -88,11 +89,12 @@ func (b *concurrentBuffer) Write(p []byte) (int, error) {
 
 	b.cond.L.Lock()
 
-	if b.sz+uint(len(p)) > b.maxsz {
+	if b.maxsz != 0 && b.sz+uint(len(p)) > b.maxsz {
 		b.cond.L.Unlock()
 		return 0, BufferFull
 	}
 
+	//XXX alot of allocations, could be improved.
 	node := &bufferedData{}
 	node.bytes = make([]byte, len(p))
 	n := copy(node.bytes, p)
