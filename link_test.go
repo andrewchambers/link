@@ -2,6 +2,7 @@ package link
 
 import (
 	"bytes"
+	"errors"
 	"mako/serial/link/concurrentbuffer"
 	"sync"
 	"testing"
@@ -9,23 +10,37 @@ import (
 )
 
 type myBuff struct {
-	m sync.Mutex
-	b bytes.Buffer
+	m      sync.Mutex
+	b      bytes.Buffer
+	closed bool
 }
 
 func (b *myBuff) Close() error {
+	b.m.Lock()
+	defer b.m.Unlock()
+	b.closed = true
 	return nil
 }
 
 func (b *myBuff) Read(p []byte) (n int, err error) {
 	b.m.Lock()
 	defer b.m.Unlock()
+
+	if b.closed {
+		return 0, errors.New("buff closed")
+	}
+
 	return b.b.Read(p)
 }
 
 func (b *myBuff) Write(p []byte) (n int, err error) {
 	b.m.Lock()
 	defer b.m.Unlock()
+
+	if b.closed {
+		return 0, errors.New("buff closed")
+	}
+
 	return b.b.Write(p)
 }
 
@@ -34,8 +49,6 @@ func (b *myBuff) Bytes() []byte {
 	defer b.m.Unlock()
 	return b.b.Bytes()
 }
-
-/*
 
 func TestLinkPacketReading(t *testing.T) {
 
@@ -144,46 +157,43 @@ func TestLinkDial(t *testing.T) {
 
 }
 
-
 func TestLinkDial2(t *testing.T) {
 
 	b1 := concurrentbuffer.New(0)
 	b2 := concurrentbuffer.New(0)
 
-	l1 := CreateLink(b1,b2)
-	l2 := CreateLink(b2,b1)
+	l1 := CreateLink(b1, b2)
+	l2 := CreateLink(b2, b1)
 
-	done := make (chan struct {})
+	done := make(chan struct{})
 
 	// server
-	go func () {
-        _,err := l1.Listen()
-        if err != nil {
-            t.Fatal("listen failed...")
-        }
-	    done <- struct{}{}
+	go func() {
+		_, err := l1.Listen()
+		if err != nil {
+			t.Fatal("listen failed...")
+		}
+		done <- struct{}{}
 	}()
 
 	// client
 	go func() {
-	    _,err := l2.Dial()
-        if err != nil {
-            t.Fatal("listen failed...")
-        }
-	    done <- struct{}{}
-	} ()
+		_, err := l2.Dial()
+		if err != nil {
+			t.Fatal("listen failed...")
+		}
+		done <- struct{}{}
+	}()
 
-    for i := 0 ; i < 2 ; i++ {
-        select {
-            case <- done:
-                // do nothing.
-            case <- time.After(1 * time.Second):
-                t.Fatal("timeout...")
-        }
-    }
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+			// do nothing.
+		case <-time.After(1 * time.Second):
+			t.Fatal("timeout...")
+		}
+	}
 }
-
-*/
 
 func TestLinkChat(t *testing.T) {
 

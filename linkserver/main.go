@@ -16,7 +16,6 @@ func main() {
 			return
 		}
 		fmt.Fprintln(os.Stderr, "got connection!")
-
 		for {
 			_, err = con.Write([]byte("hello\n"))
 			if err != nil {

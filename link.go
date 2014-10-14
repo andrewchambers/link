@@ -182,11 +182,7 @@ func (link *Link) Listen() (net.Conn, error) {
 			if err != nil {
 				return nil, err
 			}
-			err = link.Write(-1, ack)
-			if err != nil {
-				return nil, err
-			}
-			ackack, err := link.Read(5 * time.Second)
+			ackack, err := link.Read(1 * time.Second)
 			if err != nil {
 				if err == ErrTimeout {
 					continue
@@ -206,12 +202,12 @@ func (link *Link) Listen() (net.Conn, error) {
 
 func (link *Link) Dial() (net.Conn, error) {
 	connected := false
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		m := linkMessage{}
 		m.Kind = CONNECT
 		link.Write(-1, m)
 
-		ack, err := link.Read(5 * time.Second)
+		ack, err := link.Read(1 * time.Second)
 		if err != nil {
 			if err == ErrTimeout {
 				continue
@@ -335,7 +331,6 @@ func (s *LinkSession) handleMessages() {
 			return
 		}
 		switch m.Kind {
-
 		case PING:
 			s.keepAliveChannel <- struct{}{}
 		case ACK:
@@ -377,11 +372,11 @@ func (s *LinkSession) handleMessages() {
 	}
 }
 
-func (s *LinkSession) Read(b []byte) (n int, err error) {
+func (s *LinkSession) Read(b []byte) (int, error) {
 	return s.readBuff.Read(b)
 }
 
-func (s *LinkSession) Write(b []byte) (n int, err error) {
+func (s *LinkSession) Write(b []byte) (int, error) {
 	s.writeLock.Lock()
 	defer s.writeLock.Unlock()
 
@@ -404,13 +399,18 @@ func (s *LinkSession) Write(b []byte) (n int, err error) {
 			}
 		case <-time.After(15 * time.Millisecond): // XXX make this based of round trip.
 			//Resend via looping.
+		case <-s.closed:
+			//will quit on loop
 		}
 	}
 
 }
 
 func (s *LinkSession) Close() error {
-	f := func() { close(s.closed) }
+	f := func() {
+		close(s.closed)
+		s.readBuff.Close()
+	}
 	s.closeOnce.Do(f)
 	return nil
 }
