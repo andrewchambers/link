@@ -86,7 +86,7 @@ func CreateLink(r io.ReadCloser, w io.WriteCloser) *Link {
 	return ret
 }
 
-func (link *Link) Read(timeout time.Duration) (linkMessage, error) {
+func (link *Link) Read(cancel chan struct{},timeout time.Duration) (linkMessage, error) {
 
 	var timeoutChan <-chan time.Time = make(chan time.Time)
 
@@ -103,6 +103,8 @@ func (link *Link) Read(timeout time.Duration) (linkMessage, error) {
 		return linkMessage{}, ErrTimeout
 	case <-link.inputdown:
 		return linkMessage{}, fmt.Errorf("link down.")
+	case <-cancel:
+		return linkMessage{}, fmt.Errorf("read cancelled")
 	}
 }
 
@@ -169,9 +171,9 @@ func (link *Link) writeMessages(ch <-chan linkMessage) {
 }
 
 func (link *Link) Listen() (net.Conn, error) {
-
+    cancel := make(chan struct{})
 	for {
-		m, err := link.Read(-1)
+		m, err := link.Read(cancel,-1)
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +184,7 @@ func (link *Link) Listen() (net.Conn, error) {
 			if err != nil {
 				return nil, err
 			}
-			ackack, err := link.Read(1 * time.Second)
+			ackack, err := link.Read(cancel,1 * time.Second)
 			if err != nil {
 				if err == ErrTimeout {
 					continue
@@ -201,13 +203,14 @@ func (link *Link) Listen() (net.Conn, error) {
 }
 
 func (link *Link) Dial() (net.Conn, error) {
+    cancel := make(chan struct{})
 	connected := false
 	for i := 0; i < 5; i++ {
 		m := linkMessage{}
 		m.Kind = CONNECT
 		link.Write(-1, m)
 
-		ack, err := link.Read(1 * time.Second)
+		ack, err := link.Read(cancel,1 * time.Second)
 		if err != nil {
 			if err == ErrTimeout {
 				continue
@@ -326,7 +329,7 @@ func (s *LinkSession) handleTimeout() {
 func (s *LinkSession) handleMessages() {
 	defer s.Close()
 	for {
-		m, err := s.link.Read(-1)
+		m, err := s.link.Read(s.closed,-1)
 		if err != nil {
 			return
 		}

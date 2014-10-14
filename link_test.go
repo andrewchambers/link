@@ -67,11 +67,11 @@ func TestLinkPacketReading(t *testing.T) {
 
 	l := CreateLink(&in, &out)
 
-	_m1, err := l.Read(-1)
+	_m1, err := l.Read(make(chan struct{}),-1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_m2, err := l.Read(-1)
+	_m2, err := l.Read(make(chan struct{}),-1)
 	if err != nil {
 		t.Fatal(err)
 	}
