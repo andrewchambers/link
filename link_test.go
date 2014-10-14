@@ -97,7 +97,7 @@ func TestLinkPacketWriting(t *testing.T) {
 
 	l := CreateLink(&in, &out)
 
-	l.Write(-1, m1)
+	l.Write(make(chan struct{}),-1, m1)
 
 	m, err := decodeMessage(out.Bytes())
 

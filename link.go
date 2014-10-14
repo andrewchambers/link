@@ -108,7 +108,7 @@ func (link *Link) Read(cancel chan struct{},timeout time.Duration) (linkMessage,
 	}
 }
 
-func (link *Link) Write(timeout time.Duration, m linkMessage) error {
+func (link *Link) Write(cancel chan struct{},timeout time.Duration, m linkMessage) error {
 
 	var timeoutChan <-chan time.Time
 
@@ -125,6 +125,8 @@ func (link *Link) Write(timeout time.Duration, m linkMessage) error {
 		return nil
 	case <-timeoutChan:
 		return ErrTimeout
+	case <-cancel:
+	    return fmt.Errorf("write cancelled")
 	case <-link.outputdown:
 		return fmt.Errorf("link down.")
 	}
@@ -180,7 +182,7 @@ func (link *Link) Listen() (net.Conn, error) {
 		if m.Kind == CONNECT {
 			ack := linkMessage{}
 			ack.Kind = ACK
-			err = link.Write(-1, ack)
+			err = link.Write(cancel,-1, ack)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +210,7 @@ func (link *Link) Dial() (net.Conn, error) {
 	for i := 0; i < 5; i++ {
 		m := linkMessage{}
 		m.Kind = CONNECT
-		link.Write(-1, m)
+		link.Write(cancel,-1, m)
 
 		ack, err := link.Read(cancel,1 * time.Second)
 		if err != nil {
@@ -220,11 +222,11 @@ func (link *Link) Dial() (net.Conn, error) {
 		if ack.Kind == ACK {
 			ackack := linkMessage{}
 			ackack.Kind = ACKACK
-			err := link.Write(-1, ackack)
+			err := link.Write(cancel,-1, ackack)
 			if err != nil {
 				return nil, err
 			}
-			err = link.Write(-1, ackack)
+			err = link.Write(cancel,-1, ackack)
 			if err != nil {
 				return nil, err
 			}
@@ -269,7 +271,7 @@ func (s *LinkSession) sendAck(seqnum uint) error {
 	ackmessage := linkMessage{}
 	ackmessage.Kind = ACK
 	ackmessage.Seqnum = seqnum
-	err := s.link.Write(-1, ackmessage)
+	err := s.link.Write(s.closed,-1, ackmessage)
 	if err != nil {
 		s.Close()
 	}
@@ -281,7 +283,7 @@ func (s *LinkSession) sendData(seqnum uint, data []byte) error {
 	d.Kind = DATA
 	d.Seqnum = seqnum
 	d.Data = data
-	err := s.link.Write(-1, d)
+	err := s.link.Write(s.closed,-1, d)
 	if err != nil {
 		s.Close()
 	}
@@ -297,7 +299,7 @@ func (s *LinkSession) handlePings() {
 			return
 		}
 		time.Sleep(1 * time.Second)
-		err := s.link.Write(-1, p)
+		err := s.link.Write(s.closed,-1, p)
 		if err != nil {
 			return
 		}
