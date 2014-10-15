@@ -45,29 +45,16 @@ type Link struct {
 	messageOut chan<- linkMessage
 
 	// This channel is closed on shutdown...
-	closeInputOnce, closeOutputOnce sync.Once
+	closeOnce sync.Once
 	// Closed on shutdown, don't send anything to this.
-	inputdown  chan struct{}
-	outputdown chan struct{}
+	closed  chan struct{}
 }
 
 func (link *Link) Close() {
-	link.closeInput()
-	link.closeOutput()
-}
-
-func (link *Link) closeInput() {
 	f := func() {
-		close(link.inputdown)
+		close(link.closed)
 	}
-	link.closeInputOnce.Do(f)
-}
-
-func (link *Link) closeOutput() {
-	f := func() {
-		close(link.outputdown)
-	}
-	link.closeOutputOnce.Do(f)
+	link.closeOnce.Do(f)
 }
 
 func CreateLink(r io.ReadCloser, w io.WriteCloser) *Link {
@@ -78,12 +65,21 @@ func CreateLink(r io.ReadCloser, w io.WriteCloser) *Link {
 		w:          w,
 		messageIn:  in,
 		messageOut: out,
-		inputdown:  make(chan struct{}),
-		outputdown: make(chan struct{}),
+		closed:  make(chan struct{}),
 	}
 	go ret.readMessages(in)
 	go ret.writeMessages(out)
 	return ret
+}
+
+
+func (link *Link) IsDown() bool {
+    select {
+        case <- link.closed:
+            return true
+        default:
+            return false
+    }
 }
 
 func (link *Link) Read(cancel chan struct{},timeout time.Duration) (linkMessage, error) {
@@ -101,7 +97,7 @@ func (link *Link) Read(cancel chan struct{},timeout time.Duration) (linkMessage,
 		return m, nil
 	case <-timeoutChan:
 		return linkMessage{}, ErrTimeout
-	case <-link.inputdown:
+	case <-link.closed:
 		return linkMessage{}, fmt.Errorf("link down.")
 	case <-cancel:
 		return linkMessage{}, fmt.Errorf("read cancelled")
@@ -127,14 +123,14 @@ func (link *Link) Write(cancel chan struct{},timeout time.Duration, m linkMessag
 		return ErrTimeout
 	case <-cancel:
 	    return fmt.Errorf("write cancelled")
-	case <-link.outputdown:
+	case <-link.closed:
 		return fmt.Errorf("link down.")
 	}
 }
 
 func (link *Link) readMessages(ch chan<- linkMessage) {
 	reader := bufio.NewReader(link.r)
-	defer link.closeInput()
+	defer link.Close()
 	for {
 		line, err := reader.ReadBytes('~')
 		if err != nil {
@@ -147,14 +143,14 @@ func (link *Link) readMessages(ch chan<- linkMessage) {
 		select {
 		case ch <- m:
 			// Sent...
-		case <-link.inputdown:
+		case <-link.closed:
 			return
 		}
 	}
 }
 
 func (link *Link) writeMessages(ch <-chan linkMessage) {
-	defer link.closeOutput()
+	defer link.Close()
 	for {
 		select {
 		case m := <-ch:
@@ -166,13 +162,13 @@ func (link *Link) writeMessages(ch <-chan linkMessage) {
 			if err != nil {
 				return
 			}
-		case <-link.outputdown:
+		case <-link.closed:
 			return
 		}
 	}
 }
 
-func (link *Link) Listen() (net.Conn, error) {
+func (link *Link) Accept() (net.Conn, error) {
     cancel := make(chan struct{})
 	for {
 		m, err := link.Read(cancel,-1)
@@ -340,14 +336,15 @@ func (s *LinkSession) handleMessages() {
 			s.keepAliveChannel <- struct{}{}
 		case ACK:
 			s.keepAliveChannel <- struct{}{}
-			//XXX dropped ack packets slow everything down considerably.
-			// refactor somehow?
-			select {
-			case s.ackChannel <- m.Seqnum:
-			case <-time.After(1 * time.Millisecond):
-				// Noone is listening, discard ack.
-				// They will have to try again.
-			}
+			// asynchronously send the ack
+			go func() {
+			    select {
+			    case s.ackChannel <- m.Seqnum:
+			    case <-time.After(10 * time.Millisecond):
+				    // Noone is listening, discard ack.
+				    // They will have to try again.
+			    }
+			} ()
 		case DATA:
 			s.keepAliveChannel <- struct{}{}
 			switch {
@@ -381,7 +378,9 @@ func (s *LinkSession) Read(b []byte) (int, error) {
 	return s.readBuff.Read(b)
 }
 
-func (s *LinkSession) Write(b []byte) (int, error) {
+
+// Actual write logic, chunking is done in Write which defers to here.
+func (s *LinkSession) _write(b []byte) (int, error) {
 	s.writeLock.Lock()
 	defer s.writeLock.Unlock()
 
@@ -398,17 +397,50 @@ func (s *LinkSession) Write(b []byte) (int, error) {
 		}
 		select {
 		case recievedSeqnum := <-s.ackChannel:
+			// if we have recieved an ack we aren't expecting, then
+			// keep reading all the useless acks to clear them away.
+			// Maybe we will find the correct ack blocked on the channel.
+			// In normal operation I don't think this will happen.
+		    for recievedSeqnum != seqnum {
+		        select {
+		            case recievedSeqnum = <-s.ackChannel:
+		            default:
+		                goto exit
+		        }
+		    }
+		    exit:
+			
 			if recievedSeqnum == seqnum {
 				s.curSeqnum++
 				return len(b), nil
 			}
-		case <-time.After(15 * time.Millisecond): // XXX make this based of round trip.
+		case <-time.After(5 * time.Millisecond): // XXX make this based of round trip.
 			//Resend via looping.
 		case <-s.closed:
 			//will quit on loop
 		}
 	}
 
+}
+
+func (s *LinkSession) Write(b []byte) (int, error) {
+	n := 0
+	idx := 0
+	for n != len(b) {
+	    // lets send in 128 byte chunks so link errors don't cause things to never succeed.
+	    endIdx := idx + 128
+	    if endIdx > len(b) {
+	        endIdx = len(b)
+	    }
+	    chunk := b[idx:endIdx]
+	    nsent,err := s._write(chunk)
+	    n += nsent
+	    if err != nil {
+	        return n,err
+	    }
+	    idx = endIdx
+	}
+	return n,nil
 }
 
 func (s *LinkSession) Close() error {
